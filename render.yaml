@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: energy-saas-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    rootDir: backend
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DB_BEHIND_PGBOUNCER
+        value: "false"
