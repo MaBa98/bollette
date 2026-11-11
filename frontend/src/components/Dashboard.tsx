@@ -12,7 +12,7 @@ import {
 } from "recharts";
 import { api } from "../api/client";
 import { useComparisonTask } from "../hooks/useComparisonTask";
-import type { Commodity, Invoice } from "../types/energy";
+import type { Commodity, ComparisonResult, Invoice } from "../types/energy";
 
 const DAY_MS = 86_400_000;
 const shortDate = (iso: string) => new Date(iso).toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit", year: "2-digit" });
@@ -65,7 +65,6 @@ export function Dashboard() {
 
   const chartData = useMemo(() => toChartData(invoices), [invoices]);
   const lastTotal = invoices[0]?.total_amount_eur;
-  const currentSupplier = invoices[0]?.supplier_name ?? null;
 
   async function onDelete(invoice: Invoice) {
     const label = `${invoice.supplier_name ?? "Fornitore non riconosciuto"} (${shortDate(invoice.period_start)}–${shortDate(invoice.period_end)})`;
@@ -184,6 +183,9 @@ export function Dashboard() {
                   <th className="py-2 pr-4 font-medium">Periodo</th>
                   <th className="py-2 pr-4 font-medium">Fornitore</th>
                   <th className="py-2 pr-4 text-right font-medium">Consumo</th>
+                  <th className="py-2 pr-4 text-right font-medium" title="Spesa per la materia, IVA esclusa">
+                    Quota energia
+                  </th>
                   <th className="py-2 pr-4 text-right font-medium">Totale</th>
                   <th className="py-2 pr-4 font-medium">Lettura</th>
                   <th className="py-2" aria-label="Azioni" />
@@ -205,6 +207,13 @@ export function Dashboard() {
                       </td>
                       <td className="py-2 pr-4 text-right tabular-nums whitespace-nowrap">
                         {Number(inv.consumption_value).toLocaleString("it-IT")} {inv.consumption_unit}
+                      </td>
+                      <td className="py-2 pr-4 text-right tabular-nums">
+                        {inv.supply_cost_eur !== null ? (
+                          eur.format(Number(inv.supply_cost_eur))
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
                       </td>
                       <td className="py-2 pr-4 text-right tabular-nums">{eur.format(Number(inv.total_amount_eur))}</td>
                       <td className="py-2 pr-4">
@@ -245,48 +254,104 @@ export function Dashboard() {
       )}
 
       {comparison.task?.status === "succeeded" && comparison.task.result && (
-        <section className="rounded-2xl border border-slate-200 bg-white p-5">
-          <h2 className="font-medium text-slate-900">Offerte più convenienti per il tuo profilo</h2>
-          {currentSupplier && (
-            <p className="mt-1 text-sm text-slate-700">
-              Fornitore attuale: <strong>{currentSupplier}</strong>
-            </p>
-          )}
-          <p className="mt-1 text-sm text-slate-500">
-            Consumo annuo stimato: {Number(comparison.task.result.annual_consumption).toLocaleString("it-IT")} {unit} ·{" "}
-            {comparison.task.result.offers_evaluated} offerte valutate. {comparison.task.result.methodology}
-          </p>
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="py-2 pr-4 font-medium">Offerta</th>
-                  <th className="py-2 pr-4 font-medium">Prezzo</th>
-                  <th className="py-2 pr-4 font-medium">Quota fissa</th>
-                  <th className="py-2 text-right font-medium">Stima annua (quota venditore)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {comparison.task.result.top_offers.map((o) => (
-                  <tr key={o.offer_code}>
-                    <td className="py-2 pr-4">
-                      <div className="font-medium text-slate-900">{o.offer_name}</div>
-                      <div className="text-xs text-slate-500">
-                        {o.supplier_name} · {o.price_type === "fixed" ? "prezzo fisso" : "prezzo variabile"}
-                      </div>
-                    </td>
-                    <td className="py-2 pr-4 tabular-nums">{Number(o.energy_price_eur).toFixed(4)} €/{unit}</td>
-                    <td className="py-2 pr-4 tabular-nums">{eur.format(Number(o.fixed_fee_eur_month))}/mese</td>
-                    <td className="py-2 text-right font-medium tabular-nums">
-                      {eur.format(Number(o.estimated_annual_supplier_cost_eur))}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <ComparisonResultView result={comparison.task.result} />
       )}
     </main>
+  );
+}
+
+function SavingsSummary({ result }: { result: ComparisonResult }) {
+  const supplier = result.current_supplier ?? "il tuo fornitore attuale";
+  if (!result.savings_available || result.current_annual_supplier_cost_eur === null) {
+    return (
+      <p className="mt-3 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        Non ho trovato la voce "Spesa per la materia energia" nelle tue bollette, quindi posso classificare le
+        offerte ma non calcolare il risparmio rispetto a {supplier}.
+      </p>
+    );
+  }
+  const current = Number(result.current_annual_supplier_cost_eur);
+  const best = result.best_annual_saving_eur !== null ? Number(result.best_annual_saving_eur) : null;
+  return (
+    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <div className="rounded-xl bg-slate-50 p-4">
+        <div className="text-xs uppercase tracking-wide text-slate-500">Oggi con {supplier}</div>
+        <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-900">{eur.format(current)}/anno</div>
+        <div className="text-xs text-slate-500">quota energia stimata, IVA esclusa</div>
+      </div>
+      <div className={`rounded-xl p-4 ${best !== null && best > 0 ? "bg-teal-50" : "bg-slate-50"}`}>
+        <div className="text-xs uppercase tracking-wide text-slate-500">Miglior risparmio possibile</div>
+        {best !== null && best > 0 ? (
+          <>
+            <div className="mt-1 text-2xl font-semibold tabular-nums text-teal-800">{eur.format(best)}/anno</div>
+            <div className="text-xs text-slate-500">passando alla prima offerta in classifica</div>
+          </>
+        ) : (
+          <>
+            <div className="mt-1 text-lg font-semibold text-slate-900">Sei già sotto il mercato</div>
+            <div className="text-xs text-slate-500">nessuna offerta valutata costa meno della tua</div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ComparisonResultView({ result }: { result: ComparisonResult }) {
+  const unit = result.unit;
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5">
+      <h2 className="font-medium text-slate-900">Quanto risparmieresti cambiando offerta</h2>
+      <SavingsSummary result={result} />
+      <p className="mt-3 text-xs text-slate-500">
+        Consumo annuo stimato: {Number(result.annual_consumption).toLocaleString("it-IT")} {unit}, calcolato su{" "}
+        {result.billed_days} giorni di bollette · {result.offers_evaluated} offerte valutate. {result.methodology}
+      </p>
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="text-slate-500">
+            <tr>
+              <th className="py-2 pr-4 font-medium">Offerta</th>
+              <th className="py-2 pr-4 font-medium">Prezzo</th>
+              <th className="py-2 pr-4 font-medium">Quota fissa</th>
+              <th className="py-2 pr-4 text-right font-medium">Costo annuo</th>
+              <th className="py-2 text-right font-medium">Risparmio annuo</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {result.top_offers.map((o) => {
+              const saving = o.annual_saving_eur !== null ? Number(o.annual_saving_eur) : null;
+              return (
+                <tr key={o.offer_code}>
+                  <td className="py-2 pr-4">
+                    <div className="font-medium text-slate-900">{o.offer_name}</div>
+                    <div className="text-xs text-slate-500">
+                      {o.supplier_name} · {o.price_type === "fixed" ? "prezzo fisso" : "prezzo variabile"}
+                    </div>
+                  </td>
+                  <td className="py-2 pr-4 tabular-nums">{Number(o.energy_price_eur).toFixed(4)} €/{unit}</td>
+                  <td className="py-2 pr-4 tabular-nums">{eur.format(Number(o.fixed_fee_eur_month))}/mese</td>
+                  <td className="py-2 pr-4 text-right tabular-nums">
+                    {eur.format(Number(o.estimated_annual_supplier_cost_eur))}
+                  </td>
+                  <td
+                    className={`py-2 text-right font-medium tabular-nums ${
+                      saving === null ? "text-slate-400" : saving > 0 ? "text-teal-700" : "text-red-700"
+                    }`}
+                  >
+                    {saving === null ? "—" : `${saving > 0 ? "−" : "+"}${eur.format(Math.abs(saving))}`}
+                    {o.saving_pct !== null && saving !== null && (
+                      <div className="text-xs font-normal text-slate-500">
+                        {saving > 0 ? `${o.saving_pct}% in meno` : "costa di più"}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }

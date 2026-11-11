@@ -95,6 +95,13 @@ class BaseProviderTemplate(ABC):
     gas_consumption_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
         re.compile(rf"consumo\s+(?:fatturato|totale|effettivo|stimato)?[^\n\d]{{0,40}}({IT_NUMBER})\s*smc", re.I),
     )
+    # Diciture standard della bolletta sintetica ARERA, uguali per tutti i venditori.
+    electricity_supply_cost_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
+        re.compile(rf"spesa\s+per\s+(?:la\s+)?materia\s+energia[^\n\d€]{{0,60}}{CURRENCY}\s*({IT_NUMBER})", re.I),
+    )
+    gas_supply_cost_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
+        re.compile(rf"spesa\s+per\s+(?:la\s+)?materia\s+gas(?:\s+naturale)?[^\n\d€]{{0,60}}{CURRENCY}\s*({IT_NUMBER})", re.I),
+    )
     pod_pattern: ClassVar[re.Pattern[str]] = re.compile(r"\b(IT\d{3}E\d{8,9})\b", re.I)
     pdr_pattern: ClassVar[re.Pattern[str]] = re.compile(r"\bPDR\s*:?\s*(\d{14})\b", re.I)
 
@@ -118,6 +125,13 @@ class BaseProviderTemplate(ABC):
         supply_point = self.extract_supply_point(text, commodity)
         if supply_point is None:
             warnings.append("POD/PDR non trovato")
+        supply_cost = self.extract_supply_cost(text, commodity)
+        if supply_cost is None:
+            warnings.append("Quota materia energia non trovata: risparmio non calcolabile")
+        elif supply_cost > total:
+            # Incoerenza: probabile match sulla riga sbagliata. Meglio nessun dato che un dato falso.
+            warnings.append("Quota materia energia incoerente con il totale: ignorata")
+            supply_cost = None
 
         invoice = ParsedInvoice(
             provider=self.provider,
@@ -129,6 +143,7 @@ class BaseProviderTemplate(ABC):
             total_amount_eur=total,
             supply_point_code=supply_point,
             supplier_name=self.detect_supplier_name(extracted),
+            supply_cost_eur=supply_cost,
             source_kind=extracted.source_kind,
             confidence=self.score_confidence(extracted, supply_point is not None),
             warnings=tuple(warnings),
@@ -178,6 +193,18 @@ class BaseProviderTemplate(ABC):
             else self.gas_consumption_patterns
         )
         return parse_it_decimal(self._first_match(patterns, text, "consumo").group(1))
+
+    def extract_supply_cost(self, text: str, commodity: Commodity) -> Decimal | None:
+        """Facoltativo: se manca la bolletta resta valida, ma senza calcolo del risparmio."""
+        patterns = (
+            self.electricity_supply_cost_patterns
+            if commodity is Commodity.ELECTRICITY
+            else self.gas_supply_cost_patterns
+        )
+        for pattern in patterns:
+            if match := pattern.search(text):
+                return parse_it_decimal(match.group(1))
+        return None
 
     def extract_supply_point(self, text: str, commodity: Commodity) -> str | None:
         pattern = self.pod_pattern if commodity is Commodity.ELECTRICITY else self.pdr_pattern

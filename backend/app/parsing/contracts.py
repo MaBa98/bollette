@@ -100,6 +100,9 @@ class ParsedInvoice(BaseModel):
     supply_point_code: str | None = Field(default=None, description="POD (luce) o PDR (gas)")
     #: Nome commerciale leggibile (es. "A2A Energia"), anche quando non esiste un template dedicato.
     supplier_name: str | None = None
+    #: "Spesa per la materia energia / gas naturale", IVA esclusa: la sola quota del venditore.
+    #: È la base omogenea con cui confrontare le offerte. None se la voce non è stata trovata.
+    supply_cost_eur: Decimal | None = Field(default=None, ge=0)
     source_kind: SourceKind
     confidence: float = Field(ge=0.0, le=1.0)
     warnings: tuple[str, ...] = ()

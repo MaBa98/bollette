@@ -74,26 +74,43 @@ async def _refresh_offers_if_stale(session: AsyncSession, commodity: Commodity, 
     await session.commit()  # rilascia anche l'advisory lock (xact-scoped)
 
 
-def _rank_offers(offers: list[MarketOffer], annual_consumption: Decimal, top_n: int) -> list[dict[str, Any]]:
-    """Stima della sola quota venditore (materia prima + quota fissa).
+def _offer_annual_cost(offer: MarketOffer, annual_consumption: Decimal) -> Decimal:
+    return (offer.energy_price_eur * annual_consumption + offer.fixed_fee_eur_month * 12).quantize(Decimal("0.01"))
 
-    Trasporto, oneri di sistema e accise sono regolati e quasi identici tra venditori, quindi si
-    elidono nel confronto RELATIVO. Non usare questo numero come "spesa annua totale".
+
+def _rank_offers(
+    offers: list[MarketOffer],
+    annual_consumption: Decimal,
+    current_annual_cost: Decimal | None,
+    top_n: int,
+) -> list[dict[str, Any]]:
+    """Ordina le offerte per costo annuo della sola quota venditore (IVA esclusa).
+
+    Trasporto, oneri di sistema e accise sono regolati e uguali per tutti i venditori, quindi
+    si elidono: il risparmio sulla quota venditore è anche il risparmio sulla bolletta (al netto
+    dell'IVA, che lo amplifica in proporzione).
     """
-    ranked = [
-        {
-            "offer_code": o.offer_code,
-            "supplier_name": o.supplier_name,
-            "offer_name": o.offer_name,
-            "price_type": o.price_type.value,
-            "energy_price_eur": str(o.energy_price_eur),
-            "fixed_fee_eur_month": str(o.fixed_fee_eur_month),
-            "estimated_annual_supplier_cost_eur": str(
-                (o.energy_price_eur * annual_consumption + o.fixed_fee_eur_month * 12).quantize(Decimal("0.01"))
-            ),
-        }
-        for o in offers
-    ]
+    ranked: list[dict[str, Any]] = []
+    for o in offers:
+        cost = _offer_annual_cost(o, annual_consumption)
+        saving = (current_annual_cost - cost).quantize(Decimal("0.01")) if current_annual_cost is not None else None
+        ranked.append(
+            {
+                "offer_code": o.offer_code,
+                "supplier_name": o.supplier_name,
+                "offer_name": o.offer_name,
+                "price_type": o.price_type.value,
+                "energy_price_eur": str(o.energy_price_eur),
+                "fixed_fee_eur_month": str(o.fixed_fee_eur_month),
+                "estimated_annual_supplier_cost_eur": str(cost),
+                "annual_saving_eur": str(saving) if saving is not None else None,
+                "saving_pct": (
+                    str((saving / current_annual_cost * 100).quantize(Decimal("0.1")))
+                    if saving is not None and current_annual_cost
+                    else None
+                ),
+            }
+        )
     ranked.sort(key=lambda r: Decimal(r["estimated_annual_supplier_cost_eur"]))
     return ranked[:top_n]
 
@@ -105,8 +122,8 @@ async def run_market_comparison(task_id: UUID, user_id: UUID, commodity: Commodi
         try:
             await _set_status(session, task_id, status=TaskStatus.RUNNING, started_at=_now())
 
-            annual = await InvoiceRepository(session, user_id).annualized_consumption(commodity)
-            if annual is None:
+            baseline = await InvoiceRepository(session, user_id).supply_baseline(commodity)
+            if baseline is None:
                 raise ValueError("Servono bollette per almeno 2 mesi negli ultimi 12 per stimare il consumo annuo")
 
             await _refresh_offers_if_stale(session, commodity, get_offer_source())
@@ -120,12 +137,23 @@ async def run_market_comparison(task_id: UUID, user_id: UUID, commodity: Commodi
                     )
                 )
             )
+            current_cost = baseline.annual_supply_cost_eur
+            top = _rank_offers(offers, baseline.annual_consumption, current_cost, settings.comparison_top_n)
+            best_saving = top[0]["annual_saving_eur"] if top else None
             result = {
-                "annual_consumption": str(annual),
+                "annual_consumption": str(baseline.annual_consumption),
                 "unit": "kWh" if commodity is Commodity.ELECTRICITY else "Smc",
+                "billed_days": baseline.billed_days,
+                "current_supplier": baseline.supplier_name,
+                "current_annual_supplier_cost_eur": str(current_cost) if current_cost is not None else None,
+                "best_annual_saving_eur": best_saving,
+                "savings_available": current_cost is not None,
                 "offers_evaluated": len(offers),
-                "top_offers": _rank_offers(offers, annual, settings.comparison_top_n),
-                "methodology": "Solo quota venditore (energia + quota fissa); oneri regolati esclusi.",
+                "top_offers": top,
+                "methodology": (
+                    "Confronto sulla sola quota venditore (spesa per la materia), IVA esclusa: "
+                    "trasporto, oneri di sistema e accise sono uguali per tutti i venditori."
+                ),
             }
             await _set_status(session, task_id, status=TaskStatus.SUCCEEDED, finished_at=_now(), result=result)
         except Exception as exc:  # il job non deve mai morire senza lasciare traccia nel DB

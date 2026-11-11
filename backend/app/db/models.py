@@ -84,6 +84,7 @@ class Invoice(TenantMixin, TimestampMixin, Base):
     total_amount_eur: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     supply_point_code: Mapped[str | None] = mapped_column(String(32))
     supplier_name: Mapped[str | None] = mapped_column(String(120))
+    supply_cost_eur: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
     source_kind: Mapped[SourceKind] = mapped_column(_pg_enum(SourceKind, "source_kind"))
     confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2))
     warnings: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))

@@ -12,6 +12,8 @@ ENEL_TEXT = """Enel Energia S.p.A. - www.enel.it
 Bolletta luce - Periodo di fatturazione dal 01/09/2026 al 31/10/2026
 POD IT001E12345678
 Consumo fatturato nel periodo 412 kWh
+Spesa per la materia energia € 98,40
+Spesa per il trasporto e la gestione del contatore € 22,10
 Totale da pagare € 1.104,37
 """
 
@@ -19,6 +21,7 @@ PLENITUDE_GAS_TEXT = """Eni Plenitude - Bolletta gas (conguaglio)
 Periodo: 01/08/2026 - 30/09/2026
 PDR: 01234567890123
 Consumo effettivo 58,4 Smc
+Spesa per la materia gas naturale 41,25 euro
 Importo da pagare: € 96,10
 """
 
@@ -83,3 +86,24 @@ def test_distributor_group_name_is_not_mistaken_for_supplier() -> None:
     first = ENEL_TEXT.replace("Enel Energia S.p.A. - www.enel.it", "Fornitore Locale Srl\nDistributore: Unareti S.p.A. (Gruppo A2A)")
     invoice = build_default_registry().detect(first).parse(_extract(first))
     assert invoice.supplier_name is None
+
+
+
+def test_supply_cost_extracted_for_electricity_and_gas() -> None:
+    reg = build_default_registry()
+    assert reg.detect(ENEL_TEXT).parse(_extract(ENEL_TEXT)).supply_cost_eur == Decimal("98.40")
+    gas = reg.detect(PLENITUDE_GAS_TEXT).parse(_extract(PLENITUDE_GAS_TEXT))
+    assert gas.supply_cost_eur == Decimal("41.25")
+
+
+def test_missing_supply_cost_keeps_invoice_but_warns() -> None:
+    text = ENEL_TEXT.replace("Spesa per la materia energia € 98,40\n", "")
+    invoice = build_default_registry().detect(text).parse(_extract(text))
+    assert invoice.supply_cost_eur is None
+    assert any("materia energia" in w for w in invoice.warnings)
+
+
+def test_supply_cost_above_total_is_discarded() -> None:
+    text = ENEL_TEXT.replace("€ 98,40", "€ 9.840,00")
+    invoice = build_default_registry().detect(text).parse(_extract(text))
+    assert invoice.supply_cost_eur is None

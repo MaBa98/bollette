@@ -9,6 +9,7 @@ via API PostgREST di Supabase.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated
@@ -23,6 +24,20 @@ from app.core.security import CurrentUserDep
 from app.db.models import ComparisonTask, Invoice, TaskStatus, User
 from app.db.session import SessionDep
 from app.parsing.contracts import Commodity, ParsedInvoice
+
+
+MIN_BILLED_DAYS = 60  # sotto ~2 mesi di storico la stima annua è troppo rumorosa
+
+
+@dataclass(frozen=True, slots=True)
+class SupplyBaseline:
+    """Profilo annuo dell'utente. Consumo e costo sono annualizzati sullo STESSO insieme di
+    bollette (quelle con la quota materia), così il confronto con le offerte è omogeneo."""
+
+    annual_consumption: Decimal
+    annual_supply_cost_eur: Decimal | None
+    supplier_name: str | None
+    billed_days: int
 
 
 class TenantRepository:
@@ -65,6 +80,45 @@ class InvoiceRepository(TenantRepository):
         self._session.add(invoice)
         await self._session.flush()
         return invoice
+
+    async def supply_baseline(self, commodity: Commodity, today: date | None = None) -> SupplyBaseline | None:
+        since = (today or date.today()) - timedelta(days=365)
+        days = Invoice.period_end - Invoice.period_start + 1
+        has_cost = Invoice.supply_cost_eur.is_not(None)
+        stmt = select(
+            func.sum(Invoice.consumption_value),
+            func.sum(days),
+            func.sum(Invoice.consumption_value).filter(has_cost),
+            func.sum(days).filter(has_cost),
+            func.sum(Invoice.supply_cost_eur).filter(has_cost),
+        ).where(Invoice.user_id == self._user_id, Invoice.commodity == commodity, Invoice.period_end >= since)
+        all_cons, all_days, cost_cons, cost_days, cost_sum = (await self._session.execute(stmt)).one()
+
+        latest_supplier = await self._session.scalar(
+            select(Invoice.supplier_name)
+            .where(Invoice.user_id == self._user_id, Invoice.commodity == commodity)
+            .order_by(Invoice.period_end.desc())
+            .limit(1)
+        )
+
+        def annualize(value: Decimal, billed: int, q: str) -> Decimal:
+            return (Decimal(value) / Decimal(billed) * 365).quantize(Decimal(q))
+
+        if cost_days and cost_days >= MIN_BILLED_DAYS and cost_cons:
+            return SupplyBaseline(
+                annual_consumption=annualize(cost_cons, cost_days, "1"),
+                annual_supply_cost_eur=annualize(cost_sum, cost_days, "0.01"),
+                supplier_name=latest_supplier,
+                billed_days=int(cost_days),
+            )
+        if all_days and all_days >= MIN_BILLED_DAYS and all_cons:
+            return SupplyBaseline(
+                annual_consumption=annualize(all_cons, all_days, "1"),
+                annual_supply_cost_eur=None,
+                supplier_name=latest_supplier,
+                billed_days=int(all_days),
+            )
+        return None
 
     async def annualized_consumption(self, commodity: Commodity, today: date | None = None) -> Decimal | None:
         """Consumo annuo stimato dalle bollette degli ultimi 12 mesi, pesato sui giorni fatturati."""

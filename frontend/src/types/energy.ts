@@ -15,6 +15,7 @@ export interface Invoice {
   consumption_value: string;
   consumption_unit: "kWh" | "Smc";
   total_amount_eur: string;
+  supply_cost_eur: string | null; // quota materia, IVA esclusa
   supply_point_code: string | null;
   supplier_name: string | null;
   source_kind: SourceKind;
@@ -31,11 +32,18 @@ export interface RankedOffer {
   energy_price_eur: string;
   fixed_fee_eur_month: string;
   estimated_annual_supplier_cost_eur: string;
+  annual_saving_eur: string | null; // negativo = l'offerta costa più di quella attuale
+  saving_pct: string | null;
 }
 
 export interface ComparisonResult {
   annual_consumption: string;
   unit: "kWh" | "Smc";
+  billed_days: number;
+  current_supplier: string | null;
+  current_annual_supplier_cost_eur: string | null;
+  best_annual_saving_eur: string | null;
+  savings_available: boolean;
   offers_evaluated: number;
   top_offers: RankedOffer[];
   methodology: string;
