@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)  # niente segreti nei log
 
     environment: str = "dev"
     #: postgresql+asyncpg://user:pass@host:5432/postgres  (Supabase: usare il Session pooler)
@@ -52,6 +52,17 @@ class Settings(BaseSettings):
             for prefix in ("postgresql://", "postgres://"):
                 if value.startswith(prefix):
                     return "postgresql+asyncpg://" + value[len(prefix):]
+            if not value.startswith("postgresql+asyncpg://"):
+                hint = (
+                    " Sembra il Project URL di Supabase: serve invece la stringa di connessione del "
+                    "Session pooler (Connect → Connection string)."
+                    if value.startswith(("http://", "https://"))
+                    else ""
+                )
+                raise ValueError(
+                    "DATABASE_URL deve iniziare con postgresql:// "
+                    f"(ricevuto un valore che inizia con '{value.split('://')[0]}://').{hint}"
+                )
         return value
 
     @field_validator("cors_origins", mode="before")
