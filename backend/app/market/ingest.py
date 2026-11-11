@@ -18,8 +18,9 @@ import sys
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Any
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import IO, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -30,6 +31,8 @@ from app.core.config import get_settings
 from app.db.models import MarketOffer, MarketSnapshot
 from app.market import codes as C
 from app.market.portale import (
+    BASE_URL,
+    DAILY_FILES,
     OPEN_DATA_PAGE,
     Offer,
     OpenDataLinks,
@@ -43,6 +46,13 @@ from app.market.portale import (
 
 logger = logging.getLogger("ingest")
 USER_AGENT = "bollette-saas-ingest/1.0 (+https://github.com/MaBa98/bollette)"
+# Client dichiarato onestamente (nessuna finta identità da browser), con gli header standard
+# che un client HTTP ben educato invia.
+_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xml,text/csv,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9",
+}
 BATCH_SIZE = 500
 
 
@@ -134,6 +144,19 @@ class Publication:
     index_values: dict[str, Any]
 
 
+# Schema degli URL dei file giornalieri (osservato sul portale): il mese è senza zero iniziale.
+_DIRECT_PATHS = {
+    "ml_electricity": "offerteML/{y}_{m}/PO_Offerte_E_MLIBERO_{ymd}.xml",
+    "ml_gas": "offerteML/{y}_{m}/PO_Offerte_G_MLIBERO_{ymd}.xml",
+    "placet_electricity": "offerte/{y}_{m}/PO_Offerte_E_PLACET_{ymd}.csv",
+    "placet_gas": "offerte/{y}_{m}/PO_Offerte_G_PLACET_{ymd}.csv",
+    "params_electricity": "parametri/{y}_{m}/PO_Parametri_E_{ymd}.csv",
+    "params_gas": "parametri/{y}_{m}/PO_Parametri_G_{ymd}.csv",
+}
+_DIRECT_BASE = f"{BASE_URL}/portaleOfferte/resources/opendata/csv/"
+_BLOCKED = {401, 403, 429}
+
+
 def discover_publication_date(client: httpx.Client) -> tuple[date, OpenDataLinks]:
     page = client.get(OPEN_DATA_PAGE)
     page.raise_for_status()
@@ -143,10 +166,34 @@ def discover_publication_date(client: httpx.Client) -> tuple[date, OpenDataLinks
     return datetime.strptime(links.publication_date, "%Y%m%d").date(), links
 
 
-def fetch_publication(client: httpx.Client, published_on: date, links: OpenDataLinks) -> Publication:
-    """Scarica e normalizza i file del giorno. Nessun accesso al database: testabile con MockTransport."""
-    files = {name: _download(client, url) for name, (url, _day) in links.daily.items()}
-    months = read_historical_prices(_download(client, links.historical_prices)) if links.historical_prices else []
+def direct_links(client: httpx.Client, today: date | None = None, lookback_days: int = 4) -> tuple[date, OpenDataLinks]:
+    """Ripiego se la pagina Open Data è bloccata: prova gli URL dei file degli ultimi giorni.
+
+    Lo storico degli indici ha un nome non prevedibile, quindi qui non è disponibile: il chiamante
+    riusa i valori dell'ultima importazione riuscita.
+    """
+    today = today or date.today()
+    statuses: list[str] = []
+    for delta in range(lookback_days + 1):
+        day = today - timedelta(days=delta)
+        fmt = {"y": day.year, "m": day.month, "ymd": day.strftime("%Y%m%d")}
+        urls = {name: _DIRECT_BASE + path.format(**fmt) for name, path in _DIRECT_PATHS.items()}
+        probe = client.head(urls["ml_electricity"])
+        statuses.append(f"{day.isoformat()}: {probe.status_code}")
+        if probe.status_code in _BLOCKED:
+            raise IngestError(
+                "Anche i file del Portale rifiutano la richiesta da questo server "
+                f"(HTTP {probe.status_code}). Esegui l'importazione da un computer con IP domestico "
+                "oppure scarica i file dal browser e usa --from-dir."
+            )
+        if probe.status_code == 200:
+            daily = {name: (url, fmt["ymd"]) for name, url in urls.items()}
+            return day, OpenDataLinks(daily=daily, historical_prices=None)
+    raise IngestError("Nessun file trovato negli ultimi giorni (" + "; ".join(statuses) + ")")
+
+
+def build_publication(published_on: date, files: dict[str, IO[bytes]], months: list[dict[str, Any]]) -> Publication:
+    """Normalizza i file del giorno, da qualunque fonte arrivino (rete o cartella locale)."""
     placet = [
         *iter_placet_offers(files["placet_electricity"], "electricity"),
         *iter_placet_offers(files["placet_gas"], "gas"),
@@ -165,26 +212,76 @@ def fetch_publication(client: httpx.Client, published_on: date, links: OpenDataL
     )
 
 
-async def run(force: bool = False) -> int:
+def fetch_publication(client: httpx.Client, published_on: date, links: OpenDataLinks) -> Publication:
+    files = {name: _download(client, url) for name, (url, _day) in links.daily.items()}
+    months = read_historical_prices(_download(client, links.historical_prices)) if links.historical_prices else []
+    return build_publication(published_on, files, months)
+
+
+def publication_from_dir(folder: Path) -> Publication:
+    """Importa file scaricati a mano dalla pagina Open Data (i nomi originali vanno mantenuti)."""
+    if not folder.is_dir():
+        raise IngestError(f"Cartella non trovata: {folder}")
+    found: dict[str, tuple[Path, str]] = {}
+    historical: Path | None = None
+    for path in folder.iterdir():
+        for name, pattern in DAILY_FILES.items():
+            if (m := pattern.fullmatch(path.name)) and (name not in found or m.group(1) > found[name][1]):
+                found[name] = (path, m.group(1))
+        if path.suffix.lower() == ".csv" and historical is None:
+            with path.open("rb") as fh:
+                if fh.read(64).lstrip(b"\xef\xbb\xbf").startswith(b"AnnoMese"):
+                    historical = path
+    if missing := set(DAILY_FILES) - set(found):
+        raise IngestError(f"Nella cartella mancano: {', '.join(sorted(missing))}")
+    published_on = datetime.strptime(max(day for _, day in found.values()), "%Y%m%d").date()
+    files = {name: io.BytesIO(path.read_bytes()) for name, (path, _day) in found.items()}
+    months = read_historical_prices(io.BytesIO(historical.read_bytes())) if historical else []
+    return build_publication(published_on, files, months)
+
+
+async def run(force: bool = False, from_dir: Path | None = None) -> int:
     settings = get_settings()
-    with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
-        published_on, links = discover_publication_date(client)
-        engine = create_async_engine(str(settings.database_url), connect_args={"statement_cache_size": 0})
-        try:
-            async with AsyncSession(engine) as session:
-                existing = await session.scalar(select(MarketSnapshot.published_on).where(MarketSnapshot.published_on == published_on))
-                if existing and not force:
-                    logger.info("Pubblicazione del %s già presente: niente da fare", published_on)
-                    return 0
-                pub = fetch_publication(client, published_on, links)
-                await _store(session, pub.published_on, pub.rows, pub.parameters_electricity, pub.parameters_gas, pub.index_values)
-        finally:
-            await engine.dispose()
+    engine = create_async_engine(str(settings.database_url), connect_args={"statement_cache_size": 0})
+    try:
+        async with AsyncSession(engine) as session:
+            if from_dir is not None:
+                pub = publication_from_dir(from_dir)
+            else:
+                with httpx.Client(headers=_HEADERS, timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
+                    try:
+                        published_on, links = discover_publication_date(client)
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code not in _BLOCKED:
+                            raise
+                        logger.warning("Pagina Open Data bloccata (HTTP %s): provo gli URL diretti dei file", exc.response.status_code)
+                        published_on, links = direct_links(client)
+                    existing = await session.scalar(
+                        select(MarketSnapshot.published_on).where(MarketSnapshot.published_on == published_on)
+                    )
+                    if existing and not force:
+                        logger.info("Pubblicazione del %s già presente: niente da fare", published_on)
+                        return 0
+                    pub = fetch_publication(client, published_on, links)
+
+            indices = pub.index_values
+            if not indices:
+                previous = await session.scalar(
+                    select(MarketSnapshot.index_values).order_by(MarketSnapshot.published_on.desc()).limit(1)
+                )
+                indices = previous or {}
+                logger.warning(
+                    "Storico indici non disponibile: %s",
+                    "riuso i valori dell'importazione precedente" if previous else "le offerte variabili risulteranno incomplete",
+                )
+            await _store(session, pub.published_on, pub.rows, pub.parameters_electricity, pub.parameters_gas, indices)
+    finally:
+        await engine.dispose()
 
     rows = pub.rows
     logger.info(
         "Pubblicazione %s salvata: %d offerte domestiche (%d luce, %d gas), %d senza nome venditore",
-        published_on, len(rows),
+        pub.published_on, len(rows),
         sum(r["commodity"] == "electricity" for r in rows), sum(r["commodity"] == "gas" for r in rows),
         sum(1 for r in rows if not r["supplier_name"]),
     )
@@ -195,9 +292,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Importa le offerte del Portale Offerte")
     parser.add_argument("--force", action="store_true", help="reimporta anche se la pubblicazione è già presente")
+    parser.add_argument("--from-dir", type=Path, help="importa file già scaricati dalla pagina Open Data")
     args = parser.parse_args()
     try:
-        asyncio.run(run(force=args.force))
+        asyncio.run(run(force=args.force, from_dir=args.from_dir))
     except (IngestError, httpx.HTTPError) as exc:
         logger.error("Ingestione fallita: %s", exc)
         sys.exit(1)

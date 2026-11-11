@@ -83,3 +83,45 @@ def test_non_domestic_offers_are_dropped() -> None:
         published_on, links = discover_publication_date(client)
         pub = fetch_publication(client, published_on, links)
     assert "BUSINESS" not in {r["offer_code"] for r in pub.rows}
+
+
+def test_direct_links_fallback_finds_latest_available_day() -> None:
+    from datetime import date
+
+    from app.market.ingest import direct_links
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = request.url.path.rsplit("/", 1)[-1]
+        # Pubblicazione di oggi non ancora uscita: c'è solo quella di ieri
+        return httpx.Response(200) if name == "PO_Offerte_E_MLIBERO_20261110.xml" else httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        day, links = direct_links(client, today=date(2026, 11, 11))
+    assert day == date(2026, 11, 10)
+    assert links.daily["ml_electricity"][0].endswith("/offerteML/2026_11/PO_Offerte_E_MLIBERO_20261110.xml")
+    assert links.daily["params_gas"][0].endswith("/parametri/2026_11/PO_Parametri_G_20261110.csv")
+    assert links.historical_prices is None
+
+
+def test_direct_links_reports_block_clearly() -> None:
+    import pytest
+
+    from app.market.ingest import IngestError, direct_links
+
+    with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(403))) as client:
+        with pytest.raises(IngestError, match="IP domestico"):
+            direct_links(client)
+
+
+def test_publication_from_local_folder(tmp_path) -> None:
+    from app.market.ingest import publication_from_dir
+
+    for name, body in ROUTES.items():
+        if name == "open-data.page":
+            continue
+        target = "prezzi_storici.csv" if name == "storici.csv" else name
+        (tmp_path / target).write_bytes(body.encode("cp1252" if name == "storici.csv" else "utf-8"))
+    pub = publication_from_dir(tmp_path)
+    assert pub.published_on.isoformat() == "2026-11-11"
+    assert {r["offer_code"] for r in pub.rows} == {"LUCE1", "GAS1", "P1"}
+    assert pub.index_values["PSV"]["last"] == 0.90

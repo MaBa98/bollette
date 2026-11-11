@@ -191,7 +191,12 @@ Il catalogo offerte arriva dagli open data del Portale Offerte, importati ogni g
 1. GitHub → repo → *Settings → Secrets and variables → Actions → New repository secret*:
    nome `DATABASE_URL`, valore = la stessa stringa del Session pooler usata su Render.
 2. *Actions → Importa offerte Portale Offerte → Run workflow* per la prima importazione.
-3. Poi gira da solo due volte al giorno. Nota: GitHub sospende i workflow schedulati dopo 60
+3. Se il Portale blocca i server di GitHub (HTTP 403), il job prova da solo gli URL diretti dei
+   file. Se sono bloccati anche quelli, si importa da un computer con IP domestico:
+   `cd backend && DATABASE_URL=... SUPABASE_URL=https://unused.supabase.co python -m app.market.ingest`,
+   oppure, con i file scaricati dal browser dalla pagina Open Data in una cartella:
+   `python -m app.market.ingest --from-dir ~/Downloads/portale-offerte`.
+4. Poi gira da solo due volte al giorno. Nota: GitHub sospende i workflow schedulati dopo 60
    giorni senza commit sul repo; in quel caso basta riattivarlo dalla scheda Actions.
 
 ### Passo 6: prima di aprire agli utenti
