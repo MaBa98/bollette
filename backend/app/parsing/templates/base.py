@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import re
 import unicodedata
 from abc import ABC
@@ -69,6 +70,14 @@ KNOWN_SUPPLIERS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
 )
 
 
+_MONTHS = {
+    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+    "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+}
+_MONTHS_RE = "|".join(_MONTHS)
+_LINE_AMOUNT = re.compile(rf"(-?{IT_NUMBER})\s*€(?!\s*/)")
+
+
 class BaseProviderTemplate(ABC):
     """Le sottoclassi sovrascrivono SOLO pattern e hook; `parse()` non va mai ridefinito.
 
@@ -87,13 +96,34 @@ class BaseProviderTemplate(ABC):
         re.compile(rf"(?:periodo|dal)\s*:?\s*({IT_DATE})\s*(?:al|-|a)\s*({IT_DATE})", re.I),
     )
     total_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
-        re.compile(rf"totale\s+(?:complessivo\s+)?(?:da\s+pagare|bolletta|fattura)\s*:?\s*{CURRENCY}\s*({IT_NUMBER})", re.I),
+        # "Totale bolletta" per primo: esclude il canone TV, che altrimenti gonfia il costo effettivo.
+        re.compile(rf"totale\s+bolletta\s*:?\s*{CURRENCY}\s*({IT_NUMBER})", re.I),
+        re.compile(rf"totale\s+(?:complessivo\s+)?(?:da\s+pagare|fattura)\s*:?\s*{CURRENCY}\s*({IT_NUMBER})", re.I),
     )
+    # (?!annu): "Consumo annuo 216 kWh" è lo storico di 12 mesi, non il consumo della bolletta.
     electricity_consumption_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
-        re.compile(rf"consumo\s+(?:fatturato|totale|effettivo|stimato)?[^\n\d]{{0,40}}({IT_NUMBER})\s*kwh", re.I),
+        re.compile(rf"consumo\s+(?!annu)(?:fatturato|totale|effettivo|stimato)?[^\n\d]{{0,40}}({IT_NUMBER})\s*kwh", re.I),
     )
     gas_consumption_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
-        re.compile(rf"consumo\s+(?:fatturato|totale|effettivo|stimato)?[^\n\d]{{0,40}}({IT_NUMBER})\s*smc", re.I),
+        re.compile(rf"consumo\s+(?!annu)(?:fatturato|totale|effettivo|stimato)?[^\n\d]{{0,40}}({IT_NUMBER})\s*smc", re.I),
+    )
+    #: Periodo espresso a mesi: "Periodo di fatturazione Settembre 2026", "Luglio - Agosto 2026",
+    #: "Novembre 2025 - Gennaio 2026".
+    period_month_pattern: ClassVar[re.Pattern[str]] = re.compile(
+        rf"periodo\s+di\s+(?:fatturazione|riferimento)\s*:?\s*({_MONTHS_RE})(?:\s+(\d{{4}}))?"
+        rf"(?:\s*[-–/]\s*({_MONTHS_RE}))?\s+(\d{{4}})",
+        re.I,
+    )
+    #: Formato ARERA da luglio 2025: la quota venditore è scomposta in righe "di cui spesa per
+    #: vendita ..." (quota consumi + quota fissa) da sommare. L'importo è l'ultimo "X €" della riga,
+    #: escludendo i prezzi unitari ("0,130259 €/kWh").
+    electricity_supply_cost_component: ClassVar[re.Pattern[str]] = re.compile(
+        r"di\s+cui\s+spesa\s+per\s+(?:la\s+)?vendita\s+(?:di\s+|dell['’]\s*)?energia(?:\s+elettrica)?(?P<rest>[^\n]*)",
+        re.I,
+    )
+    gas_supply_cost_component: ClassVar[re.Pattern[str]] = re.compile(
+        r"di\s+cui\s+spesa\s+per\s+(?:la\s+)?vendita\s+(?:di\s+|del\s+)?gas(?:\s+naturale)?(?P<rest>[^\n]*)",
+        re.I,
     )
     # Diciture standard della bolletta sintetica ARERA, uguali per tutti i venditori.
     # Etichette della quota venditore. Due formati ARERA convivono negli storici degli utenti:
@@ -138,6 +168,7 @@ class BaseProviderTemplate(ABC):
             warnings.append("Quota materia energia incoerente con il totale: ignorata")
             supply_cost = None
 
+        supplier_name = self.detect_supplier_name(extracted)
         invoice = ParsedInvoice(
             provider=self.provider,
             commodity=commodity,
@@ -147,10 +178,10 @@ class BaseProviderTemplate(ABC):
             consumption_unit=EXPECTED_UNIT[commodity],
             total_amount_eur=total,
             supply_point_code=supply_point,
-            supplier_name=self.detect_supplier_name(extracted),
+            supplier_name=supplier_name,
             supply_cost_eur=supply_cost,
             source_kind=extracted.source_kind,
-            confidence=self.score_confidence(extracted, supply_point is not None),
+            confidence=self.score_confidence(extracted, supply_point is not None, supplier_name is not None),
             warnings=tuple(warnings),
         )
         return self.post_process(invoice, text)
@@ -185,8 +216,17 @@ class BaseProviderTemplate(ABC):
         raise ExtractionError("Impossibile determinare se la bolletta è luce o gas")
 
     def extract_period(self, text: str) -> tuple[date, date]:
-        match = self._first_match(self.period_patterns, text, "periodo di fatturazione")
-        return parse_it_date(match.group(1)), parse_it_date(match.group(2))
+        for pattern in self.period_patterns:
+            if match := pattern.search(text):
+                return parse_it_date(match.group(1)), parse_it_date(match.group(2))
+        if match := self.period_month_pattern.search(text):
+            start_month = _MONTHS[match.group(1).lower()]
+            end_month = _MONTHS[(match.group(3) or match.group(1)).lower()]
+            end_year = int(match.group(4))
+            start_year = int(match.group(2)) if match.group(2) else end_year - (1 if start_month > end_month else 0)
+            last_day = calendar.monthrange(end_year, end_month)[1]
+            return date(start_year, start_month, 1), date(end_year, end_month, last_day)
+        raise ExtractionError("Campo obbligatorio non trovato: periodo di fatturazione")
 
     def extract_total(self, text: str) -> Decimal:
         return parse_it_decimal(self._first_match(self.total_patterns, text, "totale").group(1))
@@ -201,6 +241,20 @@ class BaseProviderTemplate(ABC):
 
     def extract_supply_cost(self, text: str, commodity: Commodity) -> Decimal | None:
         """Facoltativo: se manca la bolletta resta valida, ma senza calcolo del risparmio."""
+        component = (
+            self.electricity_supply_cost_component
+            if commodity is Commodity.ELECTRICITY
+            else self.gas_supply_cost_component
+        )
+        parts: list[Decimal] = []
+        for match in component.finditer(text):
+            amounts = _LINE_AMOUNT.findall(match.group("rest"))
+            if amounts:
+                parts.append(parse_it_decimal(amounts[-1]))
+        if parts:
+            total_supply = sum(parts, Decimal("0"))
+            return total_supply if total_supply > 0 else None
+
         labels = (
             self.electricity_supply_cost_labels
             if commodity is Commodity.ELECTRICITY
@@ -244,9 +298,11 @@ class BaseProviderTemplate(ABC):
         match = pattern.search(text)
         return match.group(1).upper() if match else None
 
-    def score_confidence(self, extracted: ExtractedText, has_supply_point: bool) -> float:
+    def score_confidence(self, extracted: ExtractedText, has_supply_point: bool, supplier_known: bool = True) -> float:
         score = 0.95 if has_supply_point else 0.8
-        if self.provider is Provider.UNKNOWN:
+        # Penalità solo se non sappiamo nemmeno chi è il fornitore: con il formato ARERA 2025
+        # le diciture sono standard, quindi il template generico è affidabile quanto uno dedicato.
+        if self.provider is Provider.UNKNOWN and not supplier_known:
             score -= 0.25
         # FUTURE-PROOF: per i documenti OCR la confidence del motore OCR riduce il punteggio
         # finale; le bollette sotto 0.7 andranno in revisione manuale lato UI.

@@ -1,0 +1,27 @@
+BOLLETTA LUCE | Codice Fornitura: A-00000000
+Mario Rossi Questo mese dovrai pagare
+30,67€
+PERIODO DI RIFERIMENTO: dal 01/10/2026 al 31/10/2026
+CONSUMO FATTURATO: 18 kWh
+Emergenze Consumo annuo
+01/11/2025 - 31/10/2026
+216 kWh/anno
+NOME OFFERTA: Octopus Flex
+E-mail: ciao@octopusenergy.it
+Octopus Energy Italia Srl, società a socio unico
+CODICE POD: IT000E00000002 3.00 kW
+Scontrino dell’energia
+Quota per consumi
+18 kWh x 0,32 €/kWh 5,85 €
+di cui spesa per la rete e gli oneri generali di sistema 0,05 €/kWh 0,86 €
+di cui spesa per vendita energia elettrica 0,28 €/kWh 4,99 €
+Quota fissa
+1 mese x 7,92 €/mese 7,92 €
+di cui spesa per la rete e gli oneri generali di sistema 1,92 €/mese 1,92 €
+di cui spesa per vendita energia elettrica 6,00 €/mese 6,00 €
+Quota potenza
+3 kW x 1,98 €/kW 5,93 €
+Accise e IVA 1,97 €
+TOTALE BOLLETTA 21,67 €
+Canone di abbonamento alla televisione per uso privato 9,00 € riferito a 10-2026 9,00 €
+TOTALE DA PAGARE 30,67 €
