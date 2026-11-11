@@ -16,6 +16,7 @@ export interface Invoice {
   consumption_unit: "kWh" | "Smc";
   total_amount_eur: string;
   supply_point_code: string | null;
+  supplier_name: string | null;
   source_kind: SourceKind;
   confidence: string;
   warnings: string[];

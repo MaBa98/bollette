@@ -98,6 +98,8 @@ class ParsedInvoice(BaseModel):
     consumption_unit: ConsumptionUnit
     total_amount_eur: Decimal = Field(ge=0)
     supply_point_code: str | None = Field(default=None, description="POD (luce) o PDR (gas)")
+    #: Nome commerciale leggibile (es. "A2A Energia"), anche quando non esiste un template dedicato.
+    supplier_name: str | None = None
     source_kind: SourceKind
     confidence: float = Field(ge=0.0, le=1.0)
     warnings: tuple[str, ...] = ()

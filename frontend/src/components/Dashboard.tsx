@@ -15,6 +15,7 @@ import { useComparisonTask } from "../hooks/useComparisonTask";
 import type { Commodity, Invoice } from "../types/energy";
 
 const DAY_MS = 86_400_000;
+const shortDate = (iso: string) => new Date(iso).toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit", year: "2-digit" });
 const eur = new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" });
 
 interface ChartPoint {
@@ -64,6 +65,18 @@ export function Dashboard() {
 
   const chartData = useMemo(() => toChartData(invoices), [invoices]);
   const lastTotal = invoices[0]?.total_amount_eur;
+  const currentSupplier = invoices[0]?.supplier_name ?? null;
+
+  async function onDelete(invoice: Invoice) {
+    const label = `${invoice.supplier_name ?? "Fornitore non riconosciuto"} (${shortDate(invoice.period_start)}–${shortDate(invoice.period_end)})`;
+    if (!window.confirm(`Eliminare la bolletta ${label}? L'operazione non si può annullare.`)) return;
+    try {
+      await api.deleteInvoice(invoice.id);
+      await refresh();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Eliminazione fallita");
+    }
+  }
 
   async function onFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -161,6 +174,70 @@ export function Dashboard() {
         </div>
       </section>
 
+      {invoices.length > 0 && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-5">
+          <h2 className="font-medium text-slate-900">Le tue bollette</h2>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-slate-500">
+                <tr>
+                  <th className="py-2 pr-4 font-medium">Periodo</th>
+                  <th className="py-2 pr-4 font-medium">Fornitore</th>
+                  <th className="py-2 pr-4 text-right font-medium">Consumo</th>
+                  <th className="py-2 pr-4 text-right font-medium">Totale</th>
+                  <th className="py-2 pr-4 font-medium">Lettura</th>
+                  <th className="py-2" aria-label="Azioni" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {invoices.map((inv) => {
+                  const confidence = Number(inv.confidence);
+                  return (
+                    <tr key={inv.id} className="align-top">
+                      <td className="py-2 pr-4 tabular-nums whitespace-nowrap">
+                        {shortDate(inv.period_start)} – {shortDate(inv.period_end)}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {inv.supplier_name ?? <span className="text-slate-400">Non riconosciuto</span>}
+                        {inv.warnings.length > 0 && (
+                          <div className="text-xs text-amber-700">{inv.warnings.join(" · ")}</div>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right tabular-nums whitespace-nowrap">
+                        {Number(inv.consumption_value).toLocaleString("it-IT")} {inv.consumption_unit}
+                      </td>
+                      <td className="py-2 pr-4 text-right tabular-nums">{eur.format(Number(inv.total_amount_eur))}</td>
+                      <td className="py-2 pr-4">
+                        <span
+                          title={`Affidabilità dell'estrazione: ${Math.round(confidence * 100)}%`}
+                          className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                            confidence >= 0.9
+                              ? "bg-teal-50 text-teal-800"
+                              : confidence >= 0.7
+                                ? "bg-amber-50 text-amber-800"
+                                : "bg-red-50 text-red-700"
+                          }`}
+                        >
+                          {confidence >= 0.9 ? "Alta" : confidence >= 0.7 ? "Media" : "Da verificare"}
+                        </span>
+                      </td>
+                      <td className="py-2 text-right">
+                        <button
+                          onClick={() => void onDelete(inv)}
+                          className="text-xs text-slate-500 underline hover:text-red-700"
+                        >
+                          Elimina
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {comparison.error && (
         <p role="alert" className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800">
           {comparison.error}
@@ -170,6 +247,11 @@ export function Dashboard() {
       {comparison.task?.status === "succeeded" && comparison.task.result && (
         <section className="rounded-2xl border border-slate-200 bg-white p-5">
           <h2 className="font-medium text-slate-900">Offerte più convenienti per il tuo profilo</h2>
+          {currentSupplier && (
+            <p className="mt-1 text-sm text-slate-700">
+              Fornitore attuale: <strong>{currentSupplier}</strong>
+            </p>
+          )}
           <p className="mt-1 text-sm text-slate-500">
             Consumo annuo stimato: {Number(comparison.task.result.annual_consumption).toLocaleString("it-IT")} {unit} ·{" "}
             {comparison.task.result.offers_evaluated} offerte valutate. {comparison.task.result.methodology}

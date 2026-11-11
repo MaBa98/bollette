@@ -58,3 +58,28 @@ def test_missing_total_raises() -> None:
     text = ENEL_TEXT.replace("Totale da pagare € 1.104,37", "")
     with pytest.raises(ExtractionError):
         build_default_registry().detect(text).parse(_extract(text))
+
+
+def test_generic_template_recognises_known_supplier() -> None:
+    text = ENEL_TEXT.replace("Enel Energia S.p.A. - www.enel.it", "A2A Energia S.p.A. - Bolletta luce")
+    invoice = build_default_registry().detect(text).parse(_extract(text))
+    assert invoice.provider is Provider.UNKNOWN  # nessun template dedicato...
+    assert invoice.supplier_name == "A2A Energia"  # ...ma il nome viene riconosciuto
+
+
+def test_supplier_name_only_from_first_page() -> None:
+    first = ENEL_TEXT.replace("Enel Energia S.p.A. - www.enel.it", "Fornitore Locale Srl")
+    extracted = ExtractedText(pages=(first, "Distributore: Edison rete"), source_kind=SourceKind.NATIVE_PDF)
+    invoice = build_default_registry().detect(extracted.full_text).parse(extracted)
+    assert invoice.supplier_name is None
+
+
+def test_dedicated_template_sets_display_name() -> None:
+    invoice = build_default_registry().detect(ENEL_TEXT).parse(_extract(ENEL_TEXT))
+    assert invoice.supplier_name == "Enel Energia"
+
+
+def test_distributor_group_name_is_not_mistaken_for_supplier() -> None:
+    first = ENEL_TEXT.replace("Enel Energia S.p.A. - www.enel.it", "Fornitore Locale Srl\nDistributore: Unareti S.p.A. (Gruppo A2A)")
+    invoice = build_default_registry().detect(first).parse(_extract(first))
+    assert invoice.supplier_name is None

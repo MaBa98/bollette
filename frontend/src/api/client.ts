@@ -31,6 +31,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const body = (await res.json().catch(() => ({}))) as { detail?: string };
     throw new ApiError(res.status, body.detail ?? `Errore ${res.status}`);
   }
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
@@ -48,6 +49,8 @@ export const api = {
         "X-Filename": encodeURIComponent(file.name),
       },
     }),
+
+  deleteInvoice: (id: string) => request<void>(`/invoices/${id}`, { method: "DELETE" }),
 
   startComparison: (commodity: Commodity) =>
     request<ComparisonTask>("/comparisons", {

@@ -15,7 +15,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +43,12 @@ class InvoiceRepository(TenantRepository):
             stmt = stmt.where(Invoice.commodity == commodity)
         stmt = stmt.order_by(Invoice.period_end.desc()).limit(limit)
         return (await self._session.scalars(stmt)).all()
+
+    async def delete(self, invoice_id: UUID) -> bool:
+        """Elimina solo se la bolletta appartiene all'utente corrente."""
+        stmt = delete(Invoice).where(Invoice.id == invoice_id, Invoice.user_id == self._user_id)
+        result = await self._session.execute(stmt)
+        return (result.rowcount or 0) > 0
 
     async def exists_by_hash(self, file_sha256: str) -> bool:
         stmt = select(Invoice.id).where(Invoice.user_id == self._user_id, Invoice.file_sha256 == file_sha256)

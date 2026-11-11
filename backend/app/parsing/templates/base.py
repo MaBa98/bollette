@@ -36,6 +36,39 @@ def parse_it_date(raw: str) -> date:
     return datetime.strptime(normalized, "%d/%m/%Y").date()
 
 
+#: Venditori più diffusi sul mercato domestico italiano: (pattern, nome visualizzato).
+#: L'ordine conta: i marchi con nomi composti vanno prima di quelli più generici.
+KNOWN_SUPPLIERS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(pattern, re.I), name)
+    for pattern, name in (
+        (r"servizio\s+elettrico\s+nazionale", "Servizio Elettrico Nazionale"),
+        (r"enel\s+energia", "Enel Energia"),
+        (r"\bplenitude\b", "Plenitude"),
+        (r"\ba2a\s+energia\b", "A2A Energia"),  # NON "a2a" da solo: Unareti (gruppo A2A) è il distributore di Milano
+        (r"acea\s+energia", "Acea Energia"),
+        (r"edison\s+energia", "Edison Energia"),
+        (r"hera\s+comm", "Hera Comm"),
+        (r"iren\s+(?:mercato|luce)", "Iren"),
+        (r"\bsorgenia\b", "Sorgenia"),
+        (r"e\.on\s+energia|\be\.on\b", "E.ON Energia"),
+        (r"\bengie\b", "Engie"),
+        (r"\billumia\b", "Illumia"),
+        (r"octopus\s+energy", "Octopus Energy"),
+        (r"\bwekiwi\b", "Wekiwi"),
+        (r"\bpulsee\b", "Pulsee"),
+        (r"\biberdrola\b", "Iberdrola"),
+        (r"dolomiti\s+energia", "Dolomiti Energia"),
+        (r"\balperia\b", "Alperia"),
+        (r"\bestra\b", "Estra"),
+        (r"agsm\s*aim", "AGSM AIM"),
+        (r"\baxpo\b", "Axpo"),
+        (r"optima\s+italia", "Optima Italia"),
+        (r"duferco\s+energia", "Duferco Energia"),
+        (r"\bnen\b(?=.*energia)", "NeN"),
+    )
+)
+
+
 class BaseProviderTemplate(ABC):
     """Le sottoclassi sovrascrivono SOLO pattern e hook; `parse()` non va mai ridefinito.
 
@@ -45,6 +78,8 @@ class BaseProviderTemplate(ABC):
     """
 
     provider: ClassVar[Provider]
+    #: Nome da mostrare per i template dedicati; None = riconoscimento dal catalogo KNOWN_SUPPLIERS.
+    supplier_display_name: ClassVar[str | None] = None
     #: Pattern che identificano il fornitore nel testo (basta uno).
     detection_patterns: ClassVar[tuple[re.Pattern[str], ...]] = ()
 
@@ -93,6 +128,7 @@ class BaseProviderTemplate(ABC):
             consumption_unit=EXPECTED_UNIT[commodity],
             total_amount_eur=total,
             supply_point_code=supply_point,
+            supplier_name=self.detect_supplier_name(extracted),
             source_kind=extracted.source_kind,
             confidence=self.score_confidence(extracted, supply_point is not None),
             warnings=tuple(warnings),
@@ -104,6 +140,17 @@ class BaseProviderTemplate(ABC):
     def normalize(self, text: str) -> str:
         text = unicodedata.normalize("NFKC", text)
         return re.sub(r"[ \t]+", " ", text)
+
+    def detect_supplier_name(self, extracted: ExtractedText) -> str | None:
+        if self.supplier_display_name:
+            return self.supplier_display_name
+        # Solo la prima pagina: l'intestazione contiene il venditore, mentre le pagine successive
+        # citano spesso distributori o altri operatori (e-distribuzione, Italgas, ecc.).
+        first_page = self.normalize(extracted.pages[0] if extracted.pages else "")
+        for pattern, name in KNOWN_SUPPLIERS:
+            if pattern.search(first_page):
+                return name
+        return None
 
     def detect_commodity(self, text: str) -> Commodity:
         has_pdr = bool(self.pdr_pattern.search(text)) or bool(re.search(r"\bsmc\b", text, re.I))

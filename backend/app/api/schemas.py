@@ -23,6 +23,7 @@ class InvoiceOut(BaseModel):
     consumption_unit: ConsumptionUnit
     total_amount_eur: Decimal
     supply_point_code: str | None
+    supplier_name: str | None
     source_kind: SourceKind
     confidence: Decimal
     warnings: list[str]

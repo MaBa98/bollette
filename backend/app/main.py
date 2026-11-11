@@ -31,7 +31,7 @@ app = FastAPI(title="Energy SaaS API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-Filename"],
 )
 app.include_router(invoices.router, prefix="/api/v1")

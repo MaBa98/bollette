@@ -12,8 +12,9 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated
 from urllib.parse import unquote
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
@@ -95,3 +96,11 @@ async def upload_invoice(
 @router.get("", response_model=list[InvoiceOut])
 async def list_invoices(repo: InvoiceRepoDep, commodity: Commodity | None = None) -> list[InvoiceOut]:
     return [InvoiceOut.model_validate(i) for i in await repo.list(commodity)]
+
+
+@router.delete("/{invoice_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_invoice(invoice_id: UUID, repo: InvoiceRepoDep, session: SessionDep) -> Response:
+    if not await repo.delete(invoice_id):  # 404 anche se è di un altro utente: niente enumeration
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Bolletta non trovata")
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

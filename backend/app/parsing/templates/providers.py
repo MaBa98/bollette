@@ -11,6 +11,7 @@ from app.parsing.templates.base import CURRENCY, IT_DATE, IT_NUMBER, BaseProvide
 
 class EnelTemplate(BaseProviderTemplate):
     provider: ClassVar[Provider] = Provider.ENEL
+    supplier_display_name: ClassVar[str | None] = "Enel Energia"
     detection_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
         re.compile(r"enel\s+energia", re.I),
         re.compile(r"\benel\.it\b", re.I),
@@ -28,6 +29,7 @@ class EnelTemplate(BaseProviderTemplate):
 
 class PlenitudeTemplate(BaseProviderTemplate):
     provider: ClassVar[Provider] = Provider.PLENITUDE
+    supplier_display_name: ClassVar[str | None] = "Plenitude"
     detection_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
         re.compile(r"\bplenitude\b", re.I),
         re.compile(r"eni\s+plenitude", re.I),
