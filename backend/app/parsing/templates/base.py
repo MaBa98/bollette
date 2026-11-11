@@ -87,7 +87,7 @@ class BaseProviderTemplate(ABC):
         re.compile(rf"(?:periodo|dal)\s*:?\s*({IT_DATE})\s*(?:al|-|a)\s*({IT_DATE})", re.I),
     )
     total_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
-        re.compile(rf"totale\s+(?:da\s+pagare|bolletta|fattura)\s*:?\s*{CURRENCY}\s*({IT_NUMBER})", re.I),
+        re.compile(rf"totale\s+(?:complessivo\s+)?(?:da\s+pagare|bolletta|fattura)\s*:?\s*{CURRENCY}\s*({IT_NUMBER})", re.I),
     )
     electricity_consumption_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
         re.compile(rf"consumo\s+(?:fatturato|totale|effettivo|stimato)?[^\n\d]{{0,40}}({IT_NUMBER})\s*kwh", re.I),
@@ -96,11 +96,16 @@ class BaseProviderTemplate(ABC):
         re.compile(rf"consumo\s+(?:fatturato|totale|effettivo|stimato)?[^\n\d]{{0,40}}({IT_NUMBER})\s*smc", re.I),
     )
     # Diciture standard della bolletta sintetica ARERA, uguali per tutti i venditori.
-    electricity_supply_cost_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
-        re.compile(rf"spesa\s+per\s+(?:la\s+)?materia\s+energia[^\n\d€]{{0,60}}{CURRENCY}\s*({IT_NUMBER})", re.I),
+    # Etichette della quota venditore. Due formati ARERA convivono negli storici degli utenti:
+    #   * dal luglio 2025 ("scontrino dell'energia"): "Spesa per la vendita di energia elettrica / gas naturale"
+    #   * bolletta 2.0 precedente: "Spesa per la materia energia / gas naturale"
+    electricity_supply_cost_labels: ClassVar[tuple[re.Pattern[str], ...]] = (
+        re.compile(r"spesa\s+per\s+la\s+vendita\s+(?:di\s+|dell['’]\s*)energia(?:\s+elettrica)?", re.I),
+        re.compile(r"spesa\s+per\s+(?:la\s+)?materia\s+energia", re.I),
     )
-    gas_supply_cost_patterns: ClassVar[tuple[re.Pattern[str], ...]] = (
-        re.compile(rf"spesa\s+per\s+(?:la\s+)?materia\s+gas(?:\s+naturale)?[^\n\d€]{{0,60}}{CURRENCY}\s*({IT_NUMBER})", re.I),
+    gas_supply_cost_labels: ClassVar[tuple[re.Pattern[str], ...]] = (
+        re.compile(r"spesa\s+per\s+la\s+vendita\s+(?:di\s+|del\s+)gas(?:\s+naturale)?", re.I),
+        re.compile(r"spesa\s+per\s+(?:la\s+)?materia\s+gas(?:\s+naturale)?", re.I),
     )
     pod_pattern: ClassVar[re.Pattern[str]] = re.compile(r"\b(IT\d{3}E\d{8,9})\b", re.I)
     pdr_pattern: ClassVar[re.Pattern[str]] = re.compile(r"\bPDR\s*:?\s*(\d{14})\b", re.I)
@@ -196,15 +201,43 @@ class BaseProviderTemplate(ABC):
 
     def extract_supply_cost(self, text: str, commodity: Commodity) -> Decimal | None:
         """Facoltativo: se manca la bolletta resta valida, ma senza calcolo del risparmio."""
-        patterns = (
-            self.electricity_supply_cost_patterns
+        labels = (
+            self.electricity_supply_cost_labels
             if commodity is Commodity.ELECTRICITY
-            else self.gas_supply_cost_patterns
+            else self.gas_supply_cost_labels
         )
-        for pattern in patterns:
-            if match := pattern.search(text):
-                return parse_it_decimal(match.group(1))
+        for label in labels:
+            for match in label.finditer(text):
+                if (amount := self._amount_after_label(text, match.end())) is not None:
+                    return amount
         return None
+
+    _SAME_LINE_AMOUNT: ClassVar[re.Pattern[str]] = re.compile(
+        rf"^[^\n\d€]{{0,80}}?{CURRENCY}\s*(-?{IT_NUMBER})\s*(?:€|eur(?:o)?)?\s*$", re.I
+    )
+    _AMOUNT_ONLY_LINE: ClassVar[re.Pattern[str]] = re.compile(
+        rf"^\s*{CURRENCY}\s*(-?{IT_NUMBER})\s*(?:€|eur(?:o)?)?\s*$", re.I
+    )
+
+    def _amount_after_label(self, text: str, pos: int) -> Decimal | None:
+        """Importo della riga dell'etichetta, oppure di una riga successiva che contiene SOLO l'importo.
+
+        Volutamente rigido: con il nuovo formato la voce può avere sotto-righe (quota consumi,
+        quota fissa) e prendere il primo numero che capita darebbe un valore parziale. Un parziale
+        non verrebbe scartato dal controllo "maggiore del totale", quindi è peggio di nessun valore.
+        Il segno meno è accettato solo per riconoscere e scartare gli storni.
+        """
+        line_end = text.find("\n", pos)
+        rest_of_line = text[pos : line_end if line_end != -1 else len(text)]
+        match = self._SAME_LINE_AMOUNT.match(rest_of_line)
+        if match is None and line_end != -1:
+            next_end = text.find("\n", line_end + 1)
+            next_line = text[line_end + 1 : next_end if next_end != -1 else len(text)]
+            match = self._AMOUNT_ONLY_LINE.match(next_line)
+        if match is None:
+            return None
+        amount = parse_it_decimal(match.group(1))
+        return amount if amount > 0 else None
 
     def extract_supply_point(self, text: str, commodity: Commodity) -> str | None:
         pattern = self.pod_pattern if commodity is Commodity.ELECTRICITY else self.pdr_pattern

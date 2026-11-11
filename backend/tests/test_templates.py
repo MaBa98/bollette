@@ -107,3 +107,40 @@ def test_supply_cost_above_total_is_discarded() -> None:
     text = ENEL_TEXT.replace("€ 98,40", "€ 9.840,00")
     invoice = build_default_registry().detect(text).parse(_extract(text))
     assert invoice.supply_cost_eur is None
+
+
+
+NEW_FORMAT_TEXT = ENEL_TEXT.replace(
+    "Spesa per la materia energia € 98,40",
+    "SCONTRINO DELL'ENERGIA\nSpesa per la vendita di energia elettrica\n€ 87,15\n"
+    "Spesa per la rete e oneri generali di sistema € 30,02",
+).replace("Totale da pagare € 1.104,37", "Totale complessivo da pagare € 1.104,37")
+
+
+def test_new_2025_format_amount_on_next_line() -> None:
+    invoice = build_default_registry().detect(NEW_FORMAT_TEXT).parse(_extract(NEW_FORMAT_TEXT))
+    assert invoice.supply_cost_eur == Decimal("87.15")
+    assert invoice.total_amount_eur == Decimal("1104.37")
+
+
+def test_new_format_same_line_with_dots_leader() -> None:
+    text = ENEL_TEXT.replace(
+        "Spesa per la materia energia € 98,40", "Spesa per la vendita di energia elettrica ........ 87,15 €"
+    )
+    assert build_default_registry().detect(text).parse(_extract(text)).supply_cost_eur == Decimal("87.15")
+
+
+def test_gas_new_format() -> None:
+    text = PLENITUDE_GAS_TEXT.replace(
+        "Spesa per la materia gas naturale 41,25 euro", "Spesa per la vendita di gas naturale € 39,80"
+    )
+    assert build_default_registry().detect(text).parse(_extract(text)).supply_cost_eur == Decimal("39.80")
+
+
+def test_sub_lines_without_own_amount_are_not_guessed() -> None:
+    # La voce ha solo sotto-righe: non si prende la prima (valore parziale), si rinuncia.
+    text = ENEL_TEXT.replace(
+        "Spesa per la materia energia € 98,40",
+        "Spesa per la vendita di energia elettrica\nQuota consumi € 70,10\nQuota fissa € 17,05",
+    )
+    assert build_default_registry().detect(text).parse(_extract(text)).supply_cost_eur is None
