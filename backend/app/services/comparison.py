@@ -1,49 +1,43 @@
-"""Job di comparazione eseguito con FastAPI BackgroundTasks.
+"""Confronto con le offerte reali del mercato, eseguito con FastAPI BackgroundTasks.
 
 Ciclo di vita:
   POST /comparisons → riga PENDING + 202 {task_id} → la risposta parte subito
-  → BackgroundTasks esegue run_market_comparison() nello stesso processo, DOPO la risposta
+  → BackgroundTasks esegue run_market_comparison() dopo la risposta
   → il frontend fa polling su GET /comparisons/{id} finché status ∈ {succeeded, failed}.
 
-Limiti reali di BackgroundTasks (per questo lo stato vive nel DB e non in memoria):
-  * se il container viene riavviato o va in sleep a metà job, il job si perde in silenzio;
-    `recover_stale_tasks` all'avvio marca questi job come FAILED, così la UI non resta appesa;
-  * nessun retry, nessuna coda distribuita. Quando servirà: ARQ/Celery + Redis, oppure un
-    worker separato che fa `SELECT ... FOR UPDATE SKIP LOCKED` su comparison_tasks.
+Il catalogo offerte NON viene scaricato qui: lo popola ogni giorno il job GitHub Actions
+(app/market/ingest.py). Questo servizio legge il catalogo, filtra le offerte ammissibili per
+l'utente e calcola il costo annuo di ciascuna sul suo consumo reale.
+
+Limiti di BackgroundTasks (per questo lo stato vive nel DB): un riavvio del container a metà
+job lo perde; `recover_stale_tasks` all'avvio marca questi job come falliti.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import ComparisonTask, MarketOffer, TaskStatus
+from app.db.models import ComparisonTask, MarketOffer, MarketSnapshot, TaskStatus, User
 from app.db.repositories import InvoiceRepository
 from app.db.session import SessionFactory
+from app.market import codes as C
+from app.market.pricing import PricingInputs, eligible_for, estimate_annual_cost
 from app.parsing.contracts import Commodity
-from app.services.offer_sources import MarketOfferSource, MockPortaleOfferteSource
 
 logger = logging.getLogger(__name__)
-
-# Lock applicativo Postgres: evita che N utenti scatenino N scraping simultanei della stessa fonte.
-_SCRAPE_LOCK_KEY = {Commodity.ELECTRICITY: 910_001, Commodity.GAS: 910_002}
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def get_offer_source() -> MarketOfferSource:
-    return MockPortaleOfferteSource()
 
 
 async def _set_status(session: AsyncSession, task_id: UUID, **values: Any) -> None:
@@ -51,57 +45,49 @@ async def _set_status(session: AsyncSession, task_id: UUID, **values: Any) -> No
     await session.commit()
 
 
-async def _refresh_offers_if_stale(session: AsyncSession, commodity: Commodity, source: MarketOfferSource) -> None:
-    settings = get_settings()
-    last = await session.scalar(select(func.max(MarketOffer.scraped_at)).where(MarketOffer.commodity == commodity))
-    if last and _now() - last < timedelta(hours=settings.offers_ttl_hours):
-        return
-
-    got_lock = await session.scalar(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": _SCRAPE_LOCK_KEY[commodity]})
-    if not got_lock:
-        logger.info("Refresh offerte %s già in corso in un altro job: uso il catalogo esistente", commodity)
-        return
-
-    offers = await source.fetch(commodity)
-    if offers:
-        rows = [asdict(o) | {"scraped_at": _now()} for o in offers]
-        stmt = pg_insert(MarketOffer).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_offer_code_validity",
-            set_={c: stmt.excluded[c] for c in ("energy_price_eur", "fixed_fee_eur_month", "valid_to", "scraped_at")},
-        )
-        await session.execute(stmt)
-    await session.commit()  # rilascia anche l'advisory lock (xact-scoped)
+def _is_currently_valid(offer: dict[str, Any], now: datetime) -> bool:
+    start, end = offer.get("valid_from"), offer.get("valid_to")
+    if start and datetime.fromisoformat(start) > now:
+        return False
+    return not (end and datetime.fromisoformat(end) < now)
 
 
-def _offer_annual_cost(offer: MarketOffer, annual_consumption: Decimal) -> Decimal:
-    return (offer.energy_price_eur * annual_consumption + offer.fixed_fee_eur_month * 12).quantize(Decimal("0.01"))
-
-
-def _rank_offers(
+def build_ranking(
     offers: list[MarketOffer],
-    annual_consumption: Decimal,
+    inputs: PricingInputs,
+    *,
+    region: str | None,
     current_annual_cost: Decimal | None,
     top_n: int,
-) -> list[dict[str, Any]]:
-    """Ordina le offerte per costo annuo della sola quota venditore (IVA esclusa).
-
-    Trasporto, oneri di sistema e accise sono regolati e uguali per tutti i venditori, quindi
-    si elidono: il risparmio sulla quota venditore è anche il risparmio sulla bolletta (al netto
-    dell'IVA, che lo amplifica in proporzione).
-    """
+    now: datetime,
+) -> dict[str, Any]:
+    """Funzione pura: ammissibilità → stima → classifica. Testabile senza database."""
+    excluded: Counter[str] = Counter()
     ranked: list[dict[str, Any]] = []
-    for o in offers:
-        cost = _offer_annual_cost(o, annual_consumption)
+    for row in offers:
+        offer = row.data
+        if not _is_currently_valid(offer, now):
+            excluded["scaduta o non ancora attiva"] += 1
+            continue
+        ok, reason = eligible_for(offer, region=region, annual_consumption=inputs.annual_consumption, power_kw=inputs.power_kw)
+        if not ok:
+            excluded[reason or "non ammissibile"] += 1
+            continue
+        estimate = estimate_annual_cost(offer, inputs)
+        if not estimate.complete:
+            # Una stima incompleta sottostima il costo e finirebbe in cima alla classifica: esclusa.
+            excluded["stima incompleta"] += 1
+            continue
+        cost = Decimal(str(estimate.annual_cost)).quantize(Decimal("0.01"))
         saving = (current_annual_cost - cost).quantize(Decimal("0.01")) if current_annual_cost is not None else None
         ranked.append(
             {
-                "offer_code": o.offer_code,
-                "supplier_name": o.supplier_name,
-                "offer_name": o.offer_name,
-                "price_type": o.price_type.value,
-                "energy_price_eur": str(o.energy_price_eur),
-                "fixed_fee_eur_month": str(o.fixed_fee_eur_month),
+                "offer_code": row.offer_code,
+                "supplier_name": row.supplier_name or "Venditore non indicato",
+                "offer_name": row.offer_name or row.offer_code,
+                "price_kind": offer.get("price_kind"),
+                "source": row.source,
+                "url": offer.get("url"),
                 "estimated_annual_supplier_cost_eur": str(cost),
                 "annual_saving_eur": str(saving) if saving is not None else None,
                 "saving_pct": (
@@ -109,14 +95,15 @@ def _rank_offers(
                     if saving is not None and current_annual_cost
                     else None
                 ),
+                "breakdown": {k: round(v, 2) for k, v in estimate.breakdown.items()},
+                "notes": estimate.notes,
             }
         )
     ranked.sort(key=lambda r: Decimal(r["estimated_annual_supplier_cost_eur"]))
-    return ranked[:top_n]
+    return {"top_offers": ranked[:top_n], "offers_eligible": len(ranked), "excluded": dict(excluded)}
 
 
 async def run_market_comparison(task_id: UUID, user_id: UUID, commodity: Commodity) -> None:
-    """Entry point del BackgroundTask. Apre una sessione propria: quella della richiesta è già chiusa."""
     settings = get_settings()
     async with SessionFactory() as session:
         try:
@@ -126,33 +113,64 @@ async def run_market_comparison(task_id: UUID, user_id: UUID, commodity: Commodi
             if baseline is None:
                 raise ValueError("Servono bollette per almeno 2 mesi negli ultimi 12 per stimare il consumo annuo")
 
-            await _refresh_offers_if_stale(session, commodity, get_offer_source())
+            snapshot = await session.scalar(select(MarketSnapshot).order_by(MarketSnapshot.published_on.desc()).limit(1))
+            if snapshot is None:
+                raise ValueError("Catalogo offerte non ancora disponibile: l'importazione giornaliera non è ancora stata eseguita")
 
-            today = _now().date()
+            region = await session.scalar(select(User.region_code).where(User.id == user_id))
             offers = list(
                 await session.scalars(
                     select(MarketOffer).where(
-                        MarketOffer.commodity == commodity,
-                        (MarketOffer.valid_to.is_(None)) | (MarketOffer.valid_to >= today),
+                        MarketOffer.published_on == snapshot.published_on,
+                        MarketOffer.commodity == commodity.value,
+                        MarketOffer.client_type == C.TIPO_CLIENTE_DOMESTICO,
                     )
                 )
             )
+
+            electricity = commodity is Commodity.ELECTRICITY
+            indices = {name: v["last"] for name, v in snapshot.index_values.items() if v.get("last") is not None}
+            inputs = PricingInputs(
+                annual_consumption=float(baseline.annual_consumption),
+                parameters=snapshot.parameters_electricity if electricity else snapshot.parameters_gas,
+                index_values=indices,
+                power_kw=settings.default_power_kw,
+                regulated_dispatch_eur_kwh=settings.regulated_dispatch_eur_kwh if electricity else 0.0,
+            )
             current_cost = baseline.annual_supply_cost_eur
-            top = _rank_offers(offers, baseline.annual_consumption, current_cost, settings.comparison_top_n)
-            best_saving = top[0]["annual_saving_eur"] if top else None
+            ranking = build_ranking(
+                offers, inputs, region=region, current_annual_cost=current_cost,
+                top_n=settings.comparison_top_n, now=datetime.now(),
+            )
+            top = ranking["top_offers"]
+            reference_index = "PUN" if electricity else "PSV"
+            index_info = snapshot.index_values.get(reference_index, {})
+            age_days = (date.today() - snapshot.published_on).days
+
             result = {
                 "annual_consumption": str(baseline.annual_consumption),
-                "unit": "kWh" if commodity is Commodity.ELECTRICITY else "Smc",
+                "unit": "kWh" if electricity else "Smc",
                 "billed_days": baseline.billed_days,
                 "current_supplier": baseline.supplier_name,
                 "current_annual_supplier_cost_eur": str(current_cost) if current_cost is not None else None,
-                "best_annual_saving_eur": best_saving,
+                "best_annual_saving_eur": top[0]["annual_saving_eur"] if top else None,
                 "savings_available": current_cost is not None,
+                "region_code": region,
+                "region_name": C.REGIONS.get(region or ""),
+                "catalog_date": snapshot.published_on.isoformat(),
+                "catalog_stale": age_days > settings.offers_max_age_days,
                 "offers_evaluated": len(offers),
+                "offers_eligible": ranking["offers_eligible"],
+                "excluded": ranking["excluded"],
+                "index_reference": (
+                    {"name": reference_index, "value": index_info.get("last"), "month": index_info.get("last_month")}
+                    if index_info else None
+                ),
                 "top_offers": top,
                 "methodology": (
-                    "Confronto sulla sola quota venditore (spesa per la materia), IVA esclusa: "
-                    "trasporto, oneri di sistema e accise sono uguali per tutti i venditori."
+                    "Costo annuo della sola quota venditore (spesa per la vendita), IVA esclusa, sul tuo consumo "
+                    "annuo stimato. Rete, oneri di sistema e accise sono uguali per tutti i venditori. "
+                    "Offerte variabili stimate con l'ultimo valore mensile dell'indice; sconti condizionati esclusi."
                 ),
             }
             await _set_status(session, task_id, status=TaskStatus.SUCCEEDED, finished_at=_now(), result=result)

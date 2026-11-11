@@ -33,7 +33,14 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 10 * 1024 * 1024
 
     # --- Comparazione mercato ---
-    offers_ttl_hours: int = 24
+    #: Oltre questa età il catalogo è segnalato come non aggiornato (job giornaliero fermo?).
+    offers_max_age_days: int = 3
+    #: Dispacciamento regolato (€/kWh), incluso nella "spesa per la vendita" in bolletta ma assente
+    #: dagli open data. Valore iniziale ricavato da bollette reali di ottobre 2026 (0,0146–0,0151):
+    #: va aggiornato quando ARERA rivede il corrispettivo. Non cambia la classifica, solo i risparmi.
+    regulated_dispatch_eur_kwh: float = 0.015
+    #: Potenza impegnata ipotizzata quando non nota (3 kW è lo standard domestico).
+    default_power_kw: float = 3.0
     task_stale_after_minutes: int = 15
     comparison_top_n: int = 5
 

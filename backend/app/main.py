@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.api.v1 import comparisons, invoices
+from app.api.v1 import comparisons, invoices, profile
 from app.core.config import get_settings
 from app.db.session import SessionFactory, engine
 from app.services.comparison import recover_stale_tasks
@@ -31,11 +31,12 @@ app = FastAPI(title="Energy SaaS API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-Filename"],
 )
 app.include_router(invoices.router, prefix="/api/v1")
 app.include_router(comparisons.router, prefix="/api/v1")
+app.include_router(profile.router, prefix="/api/v1")
 
 
 @app.get("/health", include_in_schema=False)

@@ -61,6 +61,8 @@ class User(TimestampMixin, Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     email: Mapped[str | None] = mapped_column(String(320))
+    #: Codice ISTAT a 2 cifre della regione di fornitura, scelto dall'utente (filtra le offerte locali).
+    region_code: Mapped[str | None] = mapped_column(String(2))
 
     invoices: Mapped[list[Invoice]] = relationship(back_populates="user", passive_deletes=True)
 
@@ -96,34 +98,46 @@ class Invoice(TenantMixin, TimestampMixin, Base):
     user: Mapped[User] = relationship(back_populates="invoices")
 
 
-class OfferPriceType(enum.StrEnum):
-    FIXED = "fixed"
-    VARIABLE = "variable"
-
-
 class MarketOffer(Base):
-    """Catalogo condiviso delle offerte (fonte: Portale Offerte ARERA / Acquirente Unico)."""
+    """Catalogo condiviso delle offerte del giorno (fonte: open data del Portale Offerte).
+
+    Tabella pubblica, senza user_id: le offerte sono uguali per tutti. `data` contiene l'offerta
+    normalizzata (componenti, fasce, indici, sconti, zone), da cui il costo si calcola al momento
+    del confronto sul consumo del singolo utente. Si conserva solo l'ultima pubblicazione.
+    """
 
     __tablename__ = "market_offers"
     __table_args__ = (
-        UniqueConstraint("offer_code", "valid_from", name="uq_offer_code_validity"),
-        Index("ix_offer_commodity_active", "commodity", "valid_to"),
+        UniqueConstraint("published_on", "source", "offer_code", "piva", name="uq_offer_publication"),
+        Index("ix_offer_lookup", "published_on", "commodity", "client_type"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    published_on: Mapped[date] = mapped_column(Date)
+    source: Mapped[str] = mapped_column(String(20))  # mercato_libero | placet
     offer_code: Mapped[str] = mapped_column(String(64))
-    supplier_name: Mapped[str] = mapped_column(String(200))
-    offer_name: Mapped[str] = mapped_column(String(300))
-    commodity: Mapped[Commodity] = mapped_column(_pg_enum(Commodity, "commodity"))
-    price_type: Mapped[OfferPriceType] = mapped_column(_pg_enum(OfferPriceType, "offer_price_type"))
-    #: €/kWh o €/Smc della sola componente materia prima (per le variabili: spread + indice stimato).
-    energy_price_eur: Mapped[Decimal] = mapped_column(Numeric(10, 6))
-    fixed_fee_eur_month: Mapped[Decimal] = mapped_column(Numeric(8, 2))
-    valid_from: Mapped[date] = mapped_column(Date)
-    valid_to: Mapped[date | None] = mapped_column(Date)
-    source_url: Mapped[str | None] = mapped_column(String(1024))
-    raw: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
-    scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    piva: Mapped[str | None] = mapped_column(String(16))
+    supplier_name: Mapped[str | None] = mapped_column(String(200))
+    offer_name: Mapped[str | None] = mapped_column(String(300))
+    commodity: Mapped[str] = mapped_column(String(16))  # electricity | gas
+    client_type: Mapped[str | None] = mapped_column(String(2))
+    price_kind: Mapped[str | None] = mapped_column(String(16))
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class MarketSnapshot(Base):
+    """Una riga per pubblicazione: parametri regolati e valori degli indici del giorno."""
+
+    __tablename__ = "market_snapshots"
+
+    published_on: Mapped[date] = mapped_column(Date, primary_key=True)
+    parameters_electricity: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    parameters_gas: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    index_values: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    offers_electricity: Mapped[int] = mapped_column(default=0)
+    offers_gas: Mapped[int] = mapped_column(default=0)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class TaskStatus(enum.StrEnum):

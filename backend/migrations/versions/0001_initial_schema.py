@@ -22,7 +22,7 @@ branch_labels = None
 depends_on = None
 
 _TENANT_TABLES = {"users": "id", "invoices": "user_id", "comparison_tasks": "user_id"}
-_ENUM_TYPES = ("provider", "commodity", "consumption_unit", "source_kind", "offer_price_type", "task_status")
+_ENUM_TYPES = ("provider", "commodity", "consumption_unit", "source_kind", "task_status")
 
 
 def _is_supabase(bind: sa.Connection) -> bool:

@@ -183,6 +183,17 @@ soglia dei 15 minuti, e ogni ping è anche una query reale su Supabase.
 Poi su Supabase, *Authentication → URL Configuration*: aggiungi il dominio del frontend ai
 redirect consentiti, e aggiornalo anche in `CORS_ORIGINS` sul backend.
 
+### Passo 5b: offerte reali (job giornaliero)
+
+Il catalogo offerte arriva dagli open data del Portale Offerte, importati ogni giorno dal workflow
+`.github/workflows/ingest-offers.yml` (`python -m app.market.ingest`).
+
+1. GitHub → repo → *Settings → Secrets and variables → Actions → New repository secret*:
+   nome `DATABASE_URL`, valore = la stessa stringa del Session pooler usata su Render.
+2. *Actions → Importa offerte Portale Offerte → Run workflow* per la prima importazione.
+3. Poi gira da solo due volte al giorno. Nota: GitHub sospende i workflow schedulati dopo 60
+   giorni senza commit sul repo; in quel caso basta riattivarlo dalla scheda Actions.
+
 ### Passo 6: prima di aprire agli utenti
 
 - **Template su bollette vere.** Le regex di Enel/Plenitude sono plausibili ma non calibrate:

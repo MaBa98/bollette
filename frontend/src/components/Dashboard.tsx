@@ -12,7 +12,7 @@ import {
 } from "recharts";
 import { api } from "../api/client";
 import { useComparisonTask } from "../hooks/useComparisonTask";
-import type { Commodity, ComparisonResult, Invoice } from "../types/energy";
+import { REGIONS, type Commodity, type ComparisonResult, type Invoice, type Profile } from "../types/energy";
 
 const DAY_MS = 86_400_000;
 const shortDate = (iso: string) => new Date(iso).toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit", year: "2-digit" });
@@ -47,6 +47,19 @@ export function Dashboard() {
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const comparison = useComparisonTask();
+  const [profile, setProfile] = useState<Profile | null>(null);
+
+  useEffect(() => {
+    api.getProfile().then(setProfile).catch(() => setProfile(null));
+  }, []);
+
+  async function onRegionChange(code: string) {
+    try {
+      setProfile(await api.updateRegion(code));
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Impossibile salvare la regione");
+    }
+  }
 
   const unit = commodity === "electricity" ? "kWh" : "Smc";
 
@@ -163,9 +176,27 @@ export function Dashboard() {
           >
             {uploading ? "Analisi in corso…" : "Carica bolletta PDF"}
           </button>
+          <label className="flex items-center gap-2 text-sm text-slate-600">
+            <span>Regione di fornitura</span>
+            <select
+              value={profile?.region_code ?? ""}
+              onChange={(e) => void onRegionChange(e.target.value)}
+              className="rounded-lg border border-slate-300 px-2 py-2 text-sm"
+            >
+              <option value="" disabled>
+                Scegli…
+              </option>
+              {REGIONS.map(([code, name]) => (
+                <option key={code} value={code}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             onClick={() => void comparison.start(commodity)}
-            disabled={comparison.isRunning || invoices.length === 0}
+            disabled={comparison.isRunning || invoices.length === 0 || !profile?.region_code}
+            title={!profile?.region_code ? "Scegli prima la regione: molte offerte valgono solo in alcune zone" : undefined}
             className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-50"
           >
             {comparison.isRunning ? "Confronto offerte in corso…" : "Confronta con il mercato"}
@@ -297,61 +328,99 @@ function SavingsSummary({ result }: { result: ComparisonResult }) {
   );
 }
 
+const KIND_LABEL: Record<string, string> = { fisso: "prezzo fisso", variabile: "prezzo variabile", flat: "flat", mista: "mista" };
+
 function ComparisonResultView({ result }: { result: ComparisonResult }) {
   const unit = result.unit;
+  const excludedTotal = Object.values(result.excluded).reduce((a, b) => a + b, 0);
+  const catalogDate = new Date(result.catalog_date).toLocaleDateString("it-IT");
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-5">
       <h2 className="font-medium text-slate-900">Quanto risparmieresti cambiando offerta</h2>
+      {result.catalog_stale && (
+        <p className="mt-3 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          Catalogo offerte non aggiornato (ultimo del {catalogDate}): i prezzi potrebbero essere cambiati.
+        </p>
+      )}
       <SavingsSummary result={result} />
       <p className="mt-3 text-xs text-slate-500">
-        Consumo annuo stimato: {Number(result.annual_consumption).toLocaleString("it-IT")} {unit}, calcolato su{" "}
-        {result.billed_days} giorni di bollette · {result.offers_evaluated} offerte valutate. {result.methodology}
+        Consumo annuo stimato {Number(result.annual_consumption).toLocaleString("it-IT")} {unit} su {result.billed_days}{" "}
+        giorni di bollette · offerte del Portale Offerte ARERA del {catalogDate}
+        {result.region_name ? ` valide in ${result.region_name}` : ""}: {result.offers_eligible} confrontabili su{" "}
+        {result.offers_evaluated}
+        {excludedTotal > 0 && (
+          <>
+            {" "}(escluse:{" "}
+            {Object.entries(result.excluded)
+              .map(([reason, n]) => `${n} ${reason}`)
+              .join(", ")}
+            )
+          </>
+        )}
+        .
+        {result.index_reference?.value != null && (
+          <>
+            {" "}Offerte variabili stimate con {result.index_reference.name} {result.index_reference.month} ={" "}
+            {result.index_reference.value.toLocaleString("it-IT", { maximumFractionDigits: 4 })} €/{unit}.
+          </>
+        )}{" "}
+        {result.methodology}
       </p>
-      <div className="mt-4 overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead className="text-slate-500">
-            <tr>
-              <th className="py-2 pr-4 font-medium">Offerta</th>
-              <th className="py-2 pr-4 font-medium">Prezzo</th>
-              <th className="py-2 pr-4 font-medium">Quota fissa</th>
-              <th className="py-2 pr-4 text-right font-medium">Costo annuo</th>
-              <th className="py-2 text-right font-medium">Risparmio annuo</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {result.top_offers.map((o) => {
-              const saving = o.annual_saving_eur !== null ? Number(o.annual_saving_eur) : null;
-              return (
-                <tr key={o.offer_code}>
-                  <td className="py-2 pr-4">
-                    <div className="font-medium text-slate-900">{o.offer_name}</div>
-                    <div className="text-xs text-slate-500">
-                      {o.supplier_name} · {o.price_type === "fixed" ? "prezzo fisso" : "prezzo variabile"}
-                    </div>
-                  </td>
-                  <td className="py-2 pr-4 tabular-nums">{Number(o.energy_price_eur).toFixed(4)} €/{unit}</td>
-                  <td className="py-2 pr-4 tabular-nums">{eur.format(Number(o.fixed_fee_eur_month))}/mese</td>
-                  <td className="py-2 pr-4 text-right tabular-nums">
-                    {eur.format(Number(o.estimated_annual_supplier_cost_eur))}
-                  </td>
-                  <td
-                    className={`py-2 text-right font-medium tabular-nums ${
-                      saving === null ? "text-slate-400" : saving > 0 ? "text-teal-700" : "text-red-700"
-                    }`}
-                  >
-                    {saving === null ? "—" : `${saving > 0 ? "−" : "+"}${eur.format(Math.abs(saving))}`}
-                    {o.saving_pct !== null && saving !== null && (
-                      <div className="text-xs font-normal text-slate-500">
-                        {saving > 0 ? `${o.saving_pct}% in meno` : "costa di più"}
+      {result.top_offers.length === 0 ? (
+        <p className="mt-4 text-sm text-slate-600">Nessuna offerta confrontabile trovata per il tuo profilo.</p>
+      ) : (
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-slate-500">
+              <tr>
+                <th className="py-2 pr-4 font-medium">Offerta</th>
+                <th className="py-2 pr-4 text-right font-medium">Costo annuo</th>
+                <th className="py-2 text-right font-medium">Risparmio annuo</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {result.top_offers.map((o) => {
+                const saving = o.annual_saving_eur !== null ? Number(o.annual_saving_eur) : null;
+                return (
+                  <tr key={`${o.source}-${o.offer_code}`} className="align-top">
+                    <td className="py-2 pr-4">
+                      <div className="font-medium text-slate-900">
+                        {o.url ? (
+                          <a href={o.url} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                            {o.offer_name}
+                          </a>
+                        ) : (
+                          o.offer_name
+                        )}
                       </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                      <div className="text-xs text-slate-500">
+                        {o.supplier_name} · {KIND_LABEL[o.price_kind ?? ""] ?? o.price_kind ?? "—"}
+                        {o.source === "placet" && " · PLACET"}
+                      </div>
+                      {o.notes.length > 0 && <div className="text-xs text-slate-400">{o.notes.join(" ")}</div>}
+                    </td>
+                    <td className="py-2 pr-4 text-right tabular-nums">
+                      {eur.format(Number(o.estimated_annual_supplier_cost_eur))}
+                    </td>
+                    <td
+                      className={`py-2 text-right font-medium tabular-nums ${
+                        saving === null ? "text-slate-400" : saving > 0 ? "text-teal-700" : "text-red-700"
+                      }`}
+                    >
+                      {saving === null ? "—" : `${saving > 0 ? "−" : "+"}${eur.format(Math.abs(saving))}`}
+                      {o.saving_pct !== null && saving !== null && (
+                        <div className="text-xs font-normal text-slate-500">
+                          {saving > 0 ? `${o.saving_pct}% in meno` : "costa di più"}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }

@@ -28,12 +28,14 @@ export interface RankedOffer {
   offer_code: string;
   supplier_name: string;
   offer_name: string;
-  price_type: "fixed" | "variable";
-  energy_price_eur: string;
-  fixed_fee_eur_month: string;
+  price_kind: "fisso" | "variabile" | "flat" | "mista" | string | null;
+  source: "mercato_libero" | "placet";
+  url: string | null;
   estimated_annual_supplier_cost_eur: string;
   annual_saving_eur: string | null; // negativo = l'offerta costa più di quella attuale
   saving_pct: string | null;
+  breakdown: Record<string, number>;
+  notes: string[];
 }
 
 export interface ComparisonResult {
@@ -44,10 +46,32 @@ export interface ComparisonResult {
   current_annual_supplier_cost_eur: string | null;
   best_annual_saving_eur: string | null;
   savings_available: boolean;
+  region_code: string | null;
+  region_name: string | null;
+  catalog_date: string;
+  catalog_stale: boolean;
   offers_evaluated: number;
+  offers_eligible: number;
+  excluded: Record<string, number>;
+  index_reference: { name: string; value: number | null; month: string | null } | null;
   top_offers: RankedOffer[];
   methodology: string;
 }
+
+export interface Profile {
+  email: string | null;
+  region_code: string | null;
+  region_name: string | null;
+}
+
+// Codici ISTAT delle regioni, come nel tracciato del Portale Offerte
+export const REGIONS: ReadonlyArray<[code: string, name: string]> = [
+  ["01", "Piemonte"], ["02", "Valle d'Aosta"], ["03", "Lombardia"], ["04", "Trentino-Alto Adige"],
+  ["05", "Veneto"], ["06", "Friuli-Venezia Giulia"], ["07", "Liguria"], ["08", "Emilia-Romagna"],
+  ["09", "Toscana"], ["10", "Umbria"], ["11", "Marche"], ["12", "Lazio"], ["13", "Abruzzo"],
+  ["14", "Molise"], ["15", "Campania"], ["16", "Puglia"], ["17", "Basilicata"], ["18", "Calabria"],
+  ["19", "Sicilia"], ["20", "Sardegna"],
+];
 
 export interface ComparisonTask {
   id: string;

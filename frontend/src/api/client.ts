@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import type { Commodity, ComparisonTask, Invoice } from "../types/energy";
+import type { Commodity, ComparisonTask, Invoice, Profile } from "../types/energy";
 
 export const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL,
@@ -48,6 +48,15 @@ export const api = {
         "Content-Type": file.type || "application/pdf",
         "X-Filename": encodeURIComponent(file.name),
       },
+    }),
+
+  getProfile: () => request<Profile>("/me"),
+
+  updateRegion: (region_code: string) =>
+    request<Profile>("/me", {
+      method: "PUT",
+      body: JSON.stringify({ region_code }),
+      headers: { "Content-Type": "application/json" },
     }),
 
   deleteInvoice: (id: string) => request<void>(`/invoices/${id}`, { method: "DELETE" }),
