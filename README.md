@@ -141,31 +141,27 @@ niente spin-down), Supabase Pro (niente pausa, backup), frontend su Vercel Pro o
 
 1. Crea il progetto, regione **Frankfurt (eu-central-1)** (dati personali → restare in UE).
 2. *Authentication → Providers*: abilita Email (e Google se vuoi).
-3. *Project Settings → Database → Connection string → Session pooler*: copia l'URI, sostituisci
-   `postgresql://` con `postgresql+asyncpg://`. Il Session pooler è IPv4 e non richiede di
+3. *Project Settings → Database → Connection string → Session pooler*: copia l'URI così com'è
+   (il backend converte da solo `postgresql://` in `postgresql+asyncpg://`). Il Session pooler è IPv4 e non richiede di
    disattivare i prepared statement. Se usi il Transaction pooler (porta 6543) imposta
    `DB_BEHIND_PGBOUNCER=true`.
 4. Annota `SUPABASE_URL` e la anon/publishable key (frontend). Se il progetto usa ancora il
    JWT secret legacy HS256, annotalo in `JWT_SECRET`; altrimenti lascialo vuoto (verifica via JWKS).
 
-### Passo 2: schema
+### Passo 2: schema (automatico)
 
-```bash
-cd backend
-pip install -r requirements.txt
-cp .env.example .env            # compila i valori
-alembic revision --autogenerate -m "init"
-alembic upgrade head
-psql "$DATABASE_URL_SENZA_+asyncpg" -f migrations/rls.sql   # oppure incollalo nel SQL Editor
-pytest -q
-```
+Non serve fare nulla: all'avvio il container esegue `alembic upgrade head`, che crea le tabelle
+e, se rileva Supabase, attiva anche la Row Level Security (`migrations/versions/0001_initial_schema.py`).
+`migrations/rls.sql` resta solo come riferimento leggibile delle stesse policy.
+
+Per lo sviluppo locale: `pip install -r requirements.txt && cp .env.example .env && pytest -q`.
 
 ### Passo 3: backend su Render
 
 1. Push del monorepo su GitHub.
 2. Render → *New → Blueprint* → seleziona il repo: legge `render.yaml` (Docker, piano free, Frankfurt).
 3. Compila le env var con `sync: false`: `DATABASE_URL`, `SUPABASE_URL`, `JWT_SECRET` (o vuoto),
-   `CORS_ORIGINS` (es. `["https://tuo-progetto.vercel.app"]`).
+   `CORS_ORIGINS` (uno o più URL separati da virgola, es. `https://tuo-progetto.vercel.app`; va bene anche il formato JSON).
 4. Il container esegue `alembic upgrade head` all'avvio, poi uvicorn con 1 worker (512 MB di RAM).
 5. Verifica: `curl https://<servizio>.onrender.com/health` → `{"status":"ok"}`.
 
